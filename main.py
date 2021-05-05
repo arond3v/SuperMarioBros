@@ -1,23 +1,27 @@
 import tensorflow as tf
 from tensorflow.keras.layers import Dense,Flatten,Conv2D,MaxPool2D
+from tensorflow.keras.optimizers import Adam
 from nes_py.wrappers import JoypadSpace
 from gym_super_mario_bros.actions import SIMPLE_MOVEMENT,COMPLEX_MOVEMENT
 import gym_super_mario_bros
 from collections import deque
 import random
 import numpy as np
-
-MEMORY_SIZE=10_000
+from PIL import Image
+import matplotlib.pyplot as plt
+MEMORY_SIZE=100_000
 BATCH_SIZE=100
 MODEL=[]
 iteration_count=0
 ITERATION_REPLACE=19
-epsilon=1
+epsilon=0.6
 MIN_EPSILON=0.001
 EPSILON_DECAY=0.99
 target_count=0
 TARGET_REPLACE=20
 LR=0.001
+REP=[]
+backup='new'
 class Agent():
 	 def __init__(self,gamma,input_shape):
 	 	self.input_shape=input_shape
@@ -31,34 +35,46 @@ class Agent():
 	 	self.flag_got=False
 	 def create_env(self):
 	 	env = gym_super_mario_bros.make("SuperMarioBros-v0")
-	 	env = JoypadSpace(env,COMPLEX_MOVEMENT)
+	 	env = JoypadSpace(env,SIMPLE_MOVEMENT)
 	 	return env
 	 
 	 def create_model(self):
 	 	model = tf.keras.Sequential()
-	 	model.add(Conv2D(64,(4,4),input_shape=self.input_shape,activation='relu'))
+	 	model.add(Conv2D(64,(3,3),input_shape=self.input_shape))
 	 	model.add(MaxPool2D())
-	 	model.add(Conv2D(64,(4,4),activation='relu'))
+	 	model.add(Conv2D(32,(3,3)))
 	 	model.add(Flatten())
-	 	model.add(Dense(64,activation='relu'))
-	 	model.add(Dense(64,activation='relu'))
+	 	model.add(Dense(70,activation='relu'))
+	 	model.add(Dense(70,activation='relu'))
+	 	model.add(Dense(70,activation='relu'))
 	 	model.add(Dense(self.action_space,activation='linear'))
-	 	model.compile(loss='mse',optimizer=tf.keras.optimizers.Adam(lr=LR))
+	 	model.compile(loss='mse',optimizer=Adam(lr=0.0005),metrics=['accuracy'])
 	 	return model
-	 def env_step(step,action):
-	 	state_=np.zeros((256,240,4))
-	 	for i in range(4):
-	 		state,reward,info,done=env.step(action)
-	 		state=np.dot(state,[0.2989, 0.5870, 0.1140])/255
+
+	 def convert(self,state):
+	 	img=Image.fromarray(state).convert('L')
+	 	return np.array(img.resize((124,120)))
+	 def env_step(self,action):
+	 	state_=np.zeros(self.input_shape)
+	 	reward_=[]
+	 	temp=[]
+	 	for i in range(2):
+	 		self.env.render()
+	 		state,reward,done,info=self.env.step(action)
+	 		reward_.append(info['x_pos'])
+	 		state=self.convert(state)
 	 		state_[:,:,i]=state[:,:]
-	 	return state_,reward,info,done
-	 def env_reset():
-	 	state_=np.zeros((256,240,4))
+	 	temp=reward_[1]-reward_[0]
+	 	if(temp==0):
+	 		temp=-3
+	 	return state_/255,temp,done,info
+	 def env_reset(self):
+	 	state_=np.zeros(self.input_shape)
 	 	state=self.env.reset()
-	 	state=np.dot(state,[0.2989, 0.5870, 0.1140])/255
-	 	for i in range(4):
+	 	state=self.convert(state)
+	 	for i in range(2):
 	 		state_[:,:,i]=state[:,:]
-	 	return state_
+	 	return state_/255
 	 def train(self):
 	 	global target_count
 	 	if(len(self.memory)<BATCH_SIZE):
@@ -73,41 +89,43 @@ class Agent():
 	 		else:
 	 			q_list[i][action]=reward
 	 		X.append(state)
-	 	print("length",q_list.shape)
-	 	self.model.train_on_batch(np.array(X),q_list)
+	 	temp=np.array(X)
+	 	self.model.fit(temp,q_list)
 	 	target_count+=1
-	 	if(target_count>TARGET_REPLACE):
+	 	print(target_count+1)
+	 	if(target_count>=TARGET_REPLACE):
 	 		self.target.set_weights(self.model.get_weights())
+	 		print("\n Target")
 	 		target_count=0
 	 def save_memory(self):
 	 	global epsilon
 	 	REWARD=0
-	 	state=self.env.reset()
-	 	state=np.dot(state,[0.2989, 0.5870, 0.1140])/255
-	 	state=state.reshape(256,240,1)
+	 	random.shuffle(self.memory)
+	 	state=self.env_reset()
 	 	done=False
 	 	flag=False
 	 	while(not done):
 	 		if(np.random.random()>epsilon):
-	 			action=np.argmax(self.model.predict(state.reshape(1,*self.input_shape))[0])
+	 			temp=self.model.predict(state.reshape(1,*self.input_shape))
+	 			action=temp[0].argmax()
+	 			print("Action",action,end='\r')
 	 		else:
 	 			action=np.random.randint(0,self.action_space)
 	 		prev_state=state
-	 		state,reward,done,info=self.env.step(action)
-	 		self.env.render()
-	 		state=np.dot(state,[0.2989, 0.5870, 0.1140])/255
-	 		state=state.reshape(256,240,1)
+	 		state,reward,done,info=self.env_step(action)
 	 		if(info['flag_get']):
-	 			reward=info['time']
+	 			reward+=info['time']
 	 			flag=True
-	 		if(info['time']==100):
+	 		if(info['time']<(int)(200*epsilon)):
 	 			done=True
 	 		if(info['life']<2):
 	 			done=True
+	 			reward-=20
 	 		self.memory.append([prev_state,action,reward,state,done])
 	 		REWARD+=reward
 	 	if(epsilon>MIN_EPSILON):
-	 		epsilon=max(MIN_EPSILON,epsilon*EPSILON_DECAY)
+	 		epsilon*=EPSILON_DECAY
+	 	epsilon=max(MIN_EPSILON,epsilon)
 	 	print(REWARD,"eps",epsilon)
 	 	return not flag
 
@@ -124,15 +142,21 @@ class Agent():
 	 			till_flag=self.save_memory()
 	 	if(not till_flag):
 	 		print("flag_got")
-	 	if(iteration_count%20>=ITERATION_REPLACE):
-	 		MODEL.append(self.model.get_weights())
-	 	tf.saved_model.save(self.model,".")
 	 def save(self):
-	 	self.model.save_weights("weights")
+	 	self.model.save_weights(backup)
+	 	self.load()
+	 	print("Saved")
 	 def load(self):
-	 	self.model.load_weights("weights")
-
-agent=Agent(0.99,(256,240,1))
-agent.load()
-agent.play()
-agent.save()
+	 	self.model.load_weights(backup)
+	 	self.target.set_weights(self.model.get_weights())
+	 def twenty(self):
+	 	#self.load()
+	 	while(True):
+	 		self.play(till_flag=False,epoch=20)
+	 		self.save()
+	 def test(self):
+	 	self.env_reset()
+	 	for _ in range(100):
+	 		self.env_step(6)
+agent=Agent(0.9,(120,124,2))
+agent.twenty()
